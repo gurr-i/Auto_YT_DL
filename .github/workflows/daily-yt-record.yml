@@ -1,0 +1,47 @@
+name: Daily YouTube Watch & Upload
+
+# Run at 03:30 UTC => 09:00 IST
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch: # Allows manual runs
+
+jobs:
+  run-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours max
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install yt-dlp
+          # Verify rclone is pre-installed (it is)
+          rclone --version
+
+      - name: Run Watcher & Uploader Script
+        env:
+          # --- Pass secrets to Python script ---
+          CHANNEL_URL: ${{ secrets.CHANNEL_URL }}
+          GDRIVE_UPLOAD_FOLDER: ${{ secrets.GDRIVE_UPLOAD_FOLDER }} # The *name* of your GDrive folder
+          
+          # --- Configure rclone via Env Vars ---
+          # 'gdrive' is the remote name we'll use in the script
+          RCLONE_CONFIG_GDRIVE_TYPE: drive
+          RCLONE_CONFIG_GDRIVE_SCOPE: drive.file
+          # Pass the full JSON secret content directly
+          RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
+
+          # --- Script settings ---
+          OUT_DIR: ./downloads
+          MAX_RUN_SECONDS: 18000   # 5 hours; adjust as needed
+        run: |
+          mkdir -p downloads
+          python yt_live_watcher.py

@@ -1,0 +1,12 @@
+/downloads
+downloads
+*.log
+temp/tmp
+temp/*.tmp
+cache
+cache/*.cache
+.DS_Store
+node_modules
+.env
+.vscode
+.idea
