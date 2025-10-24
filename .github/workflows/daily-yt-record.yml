@@ -19,7 +19,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      # --- THIS IS THE NEW STEP ---
       - name: Install rclone
         run: |
           sudo apt-get update -y
@@ -30,24 +29,35 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install yt-dlp
-          # The rclone --version check was removed from here
 
       - name: Run Watcher & Uploader Script
         env:
           # --- Pass secrets to Python script ---
           CHANNEL_URL: ${{ secrets.CHANNEL_URL }}
-          GDRIVE_UPLOAD_FOLDER: ${{ secrets.GDRIVE_UPLOAD_FOLDER }} # The *name* of your GDrive folder
+          GDRIVE_UPLOAD_FOLDER: ${{ secrets.GDRIVE_UPLOAD_FOLDER }}
           
           # --- Configure rclone via Env Vars ---
-          # 'gdrive' is the remote name we'll use in the script
           RCLONE_CONFIG_GDRIVE_TYPE: drive
           RCLONE_CONFIG_GDRIVE_SCOPE: drive.file
-          # Pass the full JSON secret content directly
           RCLONE_CONFIG_GDRIVE_SERVICE_ACCOUNT_CREDENTIALS: ${{ secrets.GDRIVE_SA_JSON }}
+
+          # --- NEW: Pass cookies secret and file path ---
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+          COOKIE_FILE_PATH: /tmp/yt-cookies.txt
 
           # --- Script settings ---
           OUT_DIR: ./downloads
           MAX_RUN_SECONDS: 18000   # 5 hours; adjust as needed
         run: |
           mkdir -p downloads
+          
+          # --- NEW: Create the cookie file securely from the secret ---
+          if [ -n "$YT_COOKIES" ]; then
+            echo "$YT_COOKIES" > $COOKIE_FILE_PATH
+            echo "Cookie file created at $COOKIE_FILE_PATH"
+          else
+            echo "WARNING: YT_COOKIES secret is not set. Proceeding unauthenticated."
+          fi
+          
+          # Run the script
           python yt_live_watcher.py

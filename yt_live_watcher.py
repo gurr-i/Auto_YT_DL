@@ -27,26 +27,44 @@ OUT_DIR = os.getenv("OUT_DIR", "./downloads")
 OUT_TEMPLATE = os.path.join(OUT_DIR, "%(upload_date)s - %(title)s - %(id)s.%(ext)s")
 MAX_RUN_SECONDS = int(os.getenv("MAX_RUN_SECONDS", "0"))  # 0 => no limit
 
-# --- rclone Configuration --- # <--- NEW SECTION
-# This remote name 'gdrive' MUST match the 'RCLONE_CONFIG_GDRIVE_...' env var prefix
+# --- rclone Configuration ---
 RCLONE_REMOTE_NAME = "gdrive"  
-GDRIVE_FOLDER = os.getenv("GDRIVE_UPLOAD_FOLDER", "YTUploads") # Target folder name on Drive
+GDRIVE_FOLDER = os.getenv("GDRIVE_UPLOAD_FOLDER", "YTUploads")
+
+# --- NEW: Cookie Configuration ---
+COOKIE_FILE = os.getenv("COOKIE_FILE_PATH")
+COOKIES_EXIST = COOKIE_FILE and os.path.exists(COOKIE_FILE) and os.path.getsize(COOKIE_FILE) > 0
+# --- END NEW ---
 
 # --- Setup ---
 os.makedirs(OUT_DIR, exist_ok=True)
-YTDLP_CMD = [sys.executable, "-m", "yt_dlp"]
+YTDLP_CMD_BASE = [sys.executable, "-m", "yt_dlp"]
+
+# --- MODIFIED: Add cookie argument to subprocess command ---
+if COOKIES_EXIST:
+    print(f"[{datetime.now()}] Using cookies from {COOKIE_FILE}")
+    YTDLP_CMD = YTDLP_CMD_BASE + ["--cookies", COOKIE_FILE]
+else:
+    print(f"[{datetime.now()}] WARNING: No cookie file found or file empty. Running unauthenticated.")
+    YTDLP_CMD = YTDLP_CMD_BASE
+# --- END MODIFIED ---
 
 start_time = datetime.now()
 end_time = start_time + timedelta(seconds=MAX_RUN_SECONDS) if MAX_RUN_SECONDS > 0 else None
 
-# --- Helper Functions (Identical to original) ---
+# --- Helper Functions ---
 def get_video_info(video_url: str, deep_scan: bool = False) -> Dict[str, Any]:
     try:
+        # --- MODIFIED: Add cookiefile to Python module options ---
         ydl_opts = {
             "quiet": True,
             "no_warnings": True,
             "extract_flat": not deep_scan,
         }
+        if COOKIES_EXIST:
+            ydl_opts["cookiefile"] = COOKIE_FILE
+        # --- END MODIFIED ---
+            
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             if DEBUG:
                 scan_type = "DEEP" if deep_scan else "QUICK"
@@ -70,13 +88,19 @@ def get_video_info(video_url: str, deep_scan: bool = False) -> Dict[str, Any]:
     except DownloadError as e:
         msg = str(e)
         if "live event will begin" in msg:
-            m = re.search(r"\[youtube\]\s*([A-Za-z0-9_-]{11})", msg)
+            m = re.search(r"\[youtube\]\s*([A-Za-z0-N_-]{11})", msg)
             vid = m.group(1) if m else None
             return {"status": "upcoming", "video_id": vid, "errmsg": msg}
+        # --- NEW: Catch cookie errors specifically ---
+        if "Sign in to confirm you're not a bot" in msg:
+             print(f"[{datetime.now()}] CRITICAL: Cookie authentication failed. Update YT_COOKIES secret.")
+             return {"status": "error", "errmsg": "Cookie authentication failed"}
+        # --- END NEW ---
         return {"status": "error", "errmsg": msg}
     except Exception as e:
         return {"status": "error", "errmsg": str(e)}
 
+# (The rest of the script is unchanged)
 def start_record(video_url: str) -> Optional[subprocess.Popen]:
     try:
         cmd = YTDLP_CMD + [
@@ -97,7 +121,6 @@ def start_record(video_url: str) -> Optional[subprocess.Popen]:
             print(f"[{datetime.now()}] Error starting download: {str(e)}")
         return None
 
-# --- NEW UPLOAD FUNCTION ---
 def upload_downloads_to_drive():
     """
     Calls rclone to upload the contents of OUT_DIR to Google Drive.
@@ -105,28 +128,22 @@ def upload_downloads_to_drive():
     """
     print(f"[{datetime.now()}] Attempting to upload files from {OUT_DIR} to GDrive...")
     try:
-        # rclone will automatically use the 'gdrive' config from env vars
-        # We sync the *entire* download directory.
-        # Quoting the folder name handles spaces.
         upload_cmd = [
             "rclone", "copy", OUT_DIR,
             f"{RCLONE_REMOTE_NAME}:\"{GDRIVE_FOLDER}\"",
             "--create-empty-src-dirs",
             "--progress",
-            "--drive-chunk-size", "64M" # Good for runners
+            "--drive-chunk-size", "64M"
         ]
         print(f"[{datetime.now()}] Running upload: {' '.join(upload_cmd)}")
         
-        # Run upload in a blocking way with a 30-minute timeout
         up_result = subprocess.run(upload_cmd, capture_output=True, text=True, timeout=1800) 
         
         if up_result.returncode == 0:
             print(f"[{datetime.now()}] Upload complete.")
-            # rclone logs to stderr, even on success
             if DEBUG and up_result.stderr:
                 print(f"[{datetime.now()}] rclone log:\n{up_result.stderr}")
         else:
-            # Log rclone errors
             print(f"[{datetime.now()}] ERROR during upload. rclone exited with {up_result.returncode}.")
             print(f"[{datetime.now()}] rclone stderr: {up_result.stderr}")
             print(f"[{datetime.now()}] rclone stdout: {up_result.stdout}")
@@ -136,7 +153,6 @@ def upload_downloads_to_drive():
     except Exception as e:
         print(f"[{datetime.now()}] UNEXPECTED ERROR during upload: {str(e)}")
 
-# --- Main Watch Loop (Modified) ---
 def watch_loop():
     current_proc: Optional[subprocess.Popen] = None
     current_vid_id: Optional[str] = None
@@ -163,46 +179,34 @@ def watch_loop():
     def handle_sigint(sig, frame):
         print(f"\n[{datetime.now()}] Received SIGINT. Exiting gracefully...")
         stop_current_recording()
-        # Attempt one final upload on graceful exit
-        upload_downloads_to_drive() # <--- NEW
+        upload_downloads_to_drive()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_sigint)
     print(f"[{datetime.now()}] Monitoring YouTube channel: {CHANNEL_URL}")
 
     while True:
-        # --- MODIFIED: Check for timeout ---
         if end_time and datetime.now() >= end_time:
             print(f"[{datetime.now()}] Reached MAX_RUN_SECONDS limit. Exiting loop.")
             if current_proc:
                 stop_current_recording()
-            # Attempt one final upload on time-out
-            upload_downloads_to_drive() # <--- NEW
+            upload_downloads_to_drive()
             break
 
         try:
             if current_proc:
-                # --- MODIFIED: Check if recording process finished ---
                 if current_proc.poll() is not None:
                     print(f"[{datetime.now()}] Recorder for {current_vid_id} exited with code {current_proc.returncode}.")
-                    
-                    # --- NEW UPLOAD LOGIC ---
-                    # The stream finished, so upload the result *now*.
                     upload_downloads_to_drive()
-                    # --- END NEW LOGIC ---
-
                     stop_current_recording()
                     last_logged_state = "stopped"
                 else:
-                    # Heartbeat log
                     if (datetime.now() - last_logged_time).total_seconds() > HEARTBEAT_INTERVAL:
                         print(f"[{datetime.now()}] Heartbeat: Recording for video {current_vid_id} is still in progress...")
                         last_logged_time = datetime.now()
                     time.sleep(CHECK_INTERVAL)
                     continue
 
-            # (The rest of the loop for finding a new stream is identical to your original)
-            
             channel_info = get_video_info(CHANNEL_URL, deep_scan=False)
             candidate_vid_id = channel_info.get("video_id")
 
@@ -222,7 +226,7 @@ def watch_loop():
             if status == "live":
                 if candidate_vid_id != current_vid_id:
                     print(f"[{datetime.now()}] *** LIVE stream detected: '{title}' ({candidate_vid_id}) ***")
-                    stop_current_recording() # Stop previous, if any
+                    stop_current_recording()
                     
                     current_proc = start_record(video_url)
                     if current_proc:
@@ -231,31 +235,24 @@ def watch_loop():
                         last_logged_state = "recording"
                         last_logged_time = datetime.now()
 
-                        # --- MODIFIED: Inner loop to watch the recorder ---
                         while current_proc.poll() is None:
-                            # Check for timeout *inside* the recording loop
                             if end_time and datetime.now() >= end_time:
                                 print(f"[{datetime.now()}] MAX_RUN_SECONDS reached during recording. Stopping.")
-                                break # This will exit the inner 'while'
+                                break
 
                             output = current_proc.stdout.readline()
                             if output:
                                 output = output.strip()
-                                # Print streaming download progress
                                 if "[download]" in output and "Destination:" not in output:
                                     print(f"\r[{datetime.now()}] {output}", end="  ", flush=True)
-                            time.sleep(0.1) # Sleep briefly to avoid busy-waiting
+                            time.sleep(0.1)
                         
-                        print() # Add a newline after the progress output
-                        # After this inner loop finishes (either by timeout or stream end),
-                        # the outer loop will cycle, detect `current_proc.poll() is not None`,
-                        # and trigger the upload.
+                        print()
                         
                     else:
                         print(f"[{datetime.now()}] ERROR: Failed to start recording process for {candidate_vid_id}.")
                         last_logged_state = "error"
             else:
-                # (Identical logging for 'upcoming' or 'not_live' status)
                 log_key = f"waiting_{candidate_vid_id}"
                 if last_logged_state != log_key or (datetime.now() - last_logged_time).total_seconds() > QUIET_LOG_INTERVAL:
                     msg_map = {
@@ -271,7 +268,7 @@ def watch_loop():
 
         except Exception as e:
             print(f"[{datetime.now()}] An unexpected error occurred in watch_loop: {e}")
-            time.sleep(CHECK_INTERVAL * 2)
+            time.sleep(CHECK_NTTERVAL * 2)
 
 if __name__ == "__main__":
     print(f"[{datetime.now()}] YouTube Live Auto-Downloader started. Press Ctrl+C to stop.")
